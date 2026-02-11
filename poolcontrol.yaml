@@ -1,0 +1,822 @@
+esphome:
+  name: poolcontrol
+  friendly_name: PoolControl
+  project:
+    name: waveshare.esp32-s3-relay-6ch
+    version: 3.3.5 # Bumped version
+  on_boot:
+    priority: -100
+    then:
+      - switch.turn_on: pool_pump_status_request
+      - delay: 20s
+      - globals.set:
+          id: is_booting
+          value: 'false'
+      - select.set:
+          id: pool_op_mode
+          option: "Off"
+      - logger.log: "Device initialized. Smart Pool Logic Active."
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+globals:
+  - id: north_light_mode
+    type: int
+    initial_value: '1'
+  - id: south_light_mode
+    type: int
+    initial_value: '1'
+  - id: is_booting
+    type: bool
+    initial_value: 'true'
+  - id: dwell_period_ms
+    type: int
+    initial_value: '500' # Set this in Dashboard once to overwrite
+    restore_value: yes
+  - id: countdown_counter
+    type: int
+    initial_value: '0'
+  # Persistent Memory for Settings
+  - id: mem_gallons_eco
+    type: int
+    initial_value: '4000' # Updated to your preference
+    restore_value: yes
+  - id: mem_gallons_clean
+    type: int
+    initial_value: '15300'
+    restore_value: yes
+  - id: mem_swim_duration
+    type: int
+    initial_value: '120' # Updated to your preference
+    restore_value: yes
+  - id: mem_swim_aerators
+    type: bool
+    initial_value: 'false'
+    restore_value: yes
+
+logger:
+  # Default level
+
+api:
+  encryption:
+    key: "GENERATE_YOUR_OWN_KEY_HERE="
+  services:
+    - service: run_north_light_cycle
+      variables:
+        cycle_count: int
+      then:
+        - script.execute:
+            id: cycle_north_light_script
+            cycles: !lambda 'return cycle_count;'
+    - service: run_south_light_cycle
+      variables:
+        cycle_count: int
+      then:
+        - script.execute:
+            id: cycle_south_light_script
+            cycles: !lambda 'return cycle_count;'
+
+ota:
+  - platform: esphome
+    password: "Your_OTA_Password"
+
+wifi:
+  ssid: !secret "Your_SSID"
+  password: !secret "Your_Password"
+  ap:
+    ssid: "Poolcontrol Fallback Hotspot"
+    password: "YezIErUvyggZ"
+
+captive_portal:
+
+web_server:
+  port: 80
+  
+dashboard_import:
+  package_import_url: github://ryansch/esphome-config/waveshare-esp32-s3-relay-6ch.yaml
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+binary_sensor:
+  - platform: status
+    name: "Status"
+  - platform: gpio
+    name: "Boot Button"
+    pin:
+      number: 0
+      ignore_strapping_warning: true
+      mode:
+        input: true
+      inverted: true
+    disabled_by_default: true
+    on_press:
+      then:
+        - button.press: restart_button
+
+switch:
+  - platform: gpio
+    pin: GPIO1
+    id: north_light
+    name: "North Pool Light"
+  - platform: gpio
+    pin: GPIO2
+    id: south_light
+    name: "South Pool Light"
+
+  # --- VALVE CONTROLS (EXPOSED TO HA) ---
+  - platform: gpio
+    pin:
+      number: GPIO45
+      ignore_strapping_warning: true
+    id: valve_suction
+    name: "Valve Suction"
+    icon: "mdi:valve"
+    restore_mode: RESTORE_DEFAULT_OFF 
+
+  - platform: gpio
+    pin:
+      number: GPIO46
+      ignore_strapping_warning: true
+    id: valve_aerators
+    name: "Valve Aerators"
+    icon: "mdi:fountain"
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # --- NEW: SWIM MODE AERATOR TOGGLE ---
+  - platform: template
+    name: "Swim Mode Aerators"
+    id: swim_mode_aerators
+    icon: "mdi:fountain"
+    lambda: return id(mem_swim_aerators);
+    turn_on_action:
+      - globals.set:
+          id: mem_swim_aerators
+          value: 'true'
+      - if:
+          condition:
+            lambda: 'return id(pool_op_mode).state == "Swim_Mode";'
+          then:
+            - switch.turn_on: valve_aerators
+    turn_off_action:
+      - globals.set:
+          id: mem_swim_aerators
+          value: 'false'
+      - if:
+          condition:
+            lambda: 'return id(pool_op_mode).state == "Swim_Mode";'
+          then:
+            - switch.turn_off: valve_aerators
+
+  # --- PUMP COMMANDS ---
+  # Program 9: Rem Eco 30GPM
+  - platform: uart
+    id: pump_cmd_prg1
+    name: "PoolPumpExtPrg1"
+    internal: true
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x01, 0x04, 0x03, 0x21, 0x00, 0x08, 0x01, 0x46]
+    
+  # Program 10: Rem EcoBoost 38GPM
+  - platform: uart
+    id: pump_cmd_prg2
+    name: "PoolPumpExtPrg2"
+    internal: true
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x01, 0x04, 0x03, 0x21, 0x00, 0x10, 0x01, 0x4E]
+    
+  # Program 11: Rem Clean 45GPM
+  - platform: uart
+    id: pump_cmd_prg3
+    name: "PoolPumpExtPrg3"
+    internal: true
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x01, 0x04, 0x03, 0x21, 0x00, 0x18, 0x01, 0x56]
+    
+  # Program 12: Rem Max 55GPM
+  - platform: uart
+    id: pump_cmd_prg4
+    name: "PoolPumpExtPrg4"
+    internal: true
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x01, 0x04, 0x03, 0x21, 0x00, 0x20, 0x01, 0x5E]
+    
+  # --- UPDATED: EXPOSED FOR GATEKEEPER ---
+  - platform: uart
+    id: pump_cmd_off
+    name: "PoolPumpExtPrgOff"
+    internal: false
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x01, 0x04, 0x03, 0x21, 0x00, 0x00, 0x01, 0x3E]
+
+  - platform: uart
+    name: "PoolPumpDisableManCntrl"
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x04, 0x01, 0xFF, 0x02, 0x19]
+  - platform: uart
+    name: "PoolPumpEnableManCntrl"
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x04, 0x01, 0x00, 0x02, 0x19]
+    
+  - platform: uart
+    name: "PoolPumpStatusRequest"
+    id: pool_pump_status_request
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x07, 0x00, 0x01, 0x1C]
+    send_every: 10s
+  - platform: uart
+    name: "PoolPumpStartModeCommand"
+    id: pool_pump_start_command
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x06, 0x01, 0x0A, 0x01, 0x26]
+  - platform: uart
+    name: "PoolPumpStopModeCommand"
+    data: [0xFF, 0x00, 0xFF, 0xA5, 0x00, 0x60, 0x10, 0x06, 0x01, 0x04, 0x01, 0x20]
+
+# --- WATCHDOG & HEARTBEAT ---
+interval:
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(pool_op_mode).state != "Off";'
+              - lambda: 'return id(RPMA1).state < 50;'
+          then:
+            - logger.log: "Watchdog: Pump should be running but RPM is 0. Refiring commands..."
+            - script.execute: refire_pump_logic
+
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(pool_op_mode).state == "Rem_Eco_30GPM";'
+          then:
+            - switch.turn_on: pump_cmd_prg1
+      - if:
+          condition:
+            or:
+              - lambda: 'return id(pool_op_mode).state == "Rem_Clean_45GPM";'
+              - lambda: 'return id(pool_op_mode).state == "Swim_Mode";'
+          then:
+            - switch.turn_on: pump_cmd_prg3
+      - if:
+          condition:
+            or:
+              - lambda: 'return id(pool_op_mode).state == "Rem_EcoBoost_38GPM";'
+              - lambda: 'return id(pool_op_mode).state == "Cleaning_Vac";'
+          then:
+            - switch.turn_on: pump_cmd_prg2
+      - if:
+          condition:
+            or:
+              - lambda: 'return id(pool_op_mode).state == "Rem_Max_55GPM";'
+              - lambda: 'return id(pool_op_mode).state == "Super_Cooling";'
+              - lambda: 'return id(pool_op_mode).state == "Storm_Defense";'
+          then:
+            - switch.turn_on: pump_cmd_prg4
+
+# --- POOL OPERATION LOGIC ---
+select:
+  - platform: template
+    name: "Pool Operation Mode"
+    id: pool_op_mode
+    options:
+      - "Off"
+      - "Swim_Mode"
+      - "Rem_Eco_30GPM"
+      - "Rem_EcoBoost_38GPM"
+      - "Rem_Clean_45GPM"
+      - "Rem_Max_55GPM"
+      - "Cleaning_Vac"
+      - "Storm_Defense"
+      - "Super_Cooling"
+    optimistic: true
+    on_value:
+      then:
+        - script.execute: refire_pump_logic
+
+uart:
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  baud_rate: 9600
+  debug:
+    direction: BOTH
+    dummy_receiver: true
+    after:
+      # Restored 0x1C delimiter to ensure reliable packet framing
+      delimiter: [0x1C]
+    sequence:
+      - lambda: |-
+          if (direction == UART_DIRECTION_RX)
+            {
+              // The original logic works best with delimiter 0x1C
+              if (bytes.size() == 26)
+                {
+                  if ( bytes[0] == 0xFF && bytes[1] == 0x00 && bytes[2] == 0xFF && bytes[8] == 0x0F )
+                    {
+                      id(READY).publish_state(bytes[9]);
+                      id(PROG).publish_state(bytes[10]);
+                      id(MODE).publish_state(bytes[11]);
+                      id(POWER).publish_state((bytes[12] * 256) + bytes[13]);
+                      id(RPMA1).publish_state((bytes[14] * 256) + bytes[15]);
+                      id(FLOWA1).publish_state(bytes[16]);
+                      id(PRCNT).publish_state(bytes[17]);
+                      id(REMTIMEH).publish_state(bytes[20]);
+                      id(REMTIMEM).publish_state(bytes[21]);
+                      
+                      // --- NEW SENSORS (From CSV) ---
+                      // Byte 21: Error Code (Often mirrors Status 0x0A if no error)
+                      id(pool_pump_error_code).publish_state(bytes[21]);
+                      
+                      // Byte 23: Drive Temperature
+                      if (bytes[23] > 0) {
+                        id(pool_drive_temp).publish_state(bytes[23]);
+                      }
+                    }
+                }
+            }
+
+number:
+  - platform: template
+    name: "Swim Mode Timer"
+    id: swim_mode_duration
+    min_value: 10
+    max_value: 240
+    step: 10
+    mode: box
+    unit_of_measurement: "min"
+    icon: mdi:timer-outline
+    lambda: return id(mem_swim_duration);
+    set_action:
+      then:
+        - globals.set:
+            id: mem_swim_duration
+            value: !lambda 'return x;'
+        - lambda: 'id(swim_mode_duration).publish_state(x);'
+
+  - platform: template
+    name: "Target Gallons Eco"
+    id: target_gallons_eco
+    min_value: 1000
+    max_value: 15000
+    step: 100
+    mode: box
+    unit_of_measurement: "gal"
+    icon: mdi:water-opacity
+    lambda: return id(mem_gallons_eco);
+    set_action:
+      then:
+        - globals.set:
+            id: mem_gallons_eco
+            value: !lambda 'return x;'
+        - lambda: 'id(target_gallons_eco).publish_state(x);'
+
+  - platform: template
+    name: "Target Gallons Clean"
+    id: target_gallons_clean
+    min_value: 5000
+    max_value: 30000
+    step: 100
+    mode: box
+    unit_of_measurement: "gal"
+    icon: mdi:water-plus
+    lambda: return id(mem_gallons_clean);
+    set_action:
+      then:
+        - globals.set:
+            id: mem_gallons_clean
+            value: !lambda 'return x;'
+        - lambda: 'id(target_gallons_clean).publish_state(x);'
+
+  # --- Light Modes ---
+  - platform: template
+    name: "North Pool Light Mode"
+    id: north_pool_light_mode
+    mode: box
+    min_value: 1
+    max_value: 15
+    step: 1
+    update_interval: never
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(is_booting);'
+            then:
+              - script.execute:
+                  id: cycle_north_light_script
+                  cycles: !lambda 'return x - 1;'
+    lambda: |-
+      return id(north_light_mode);
+    set_action:
+      then:
+        - globals.set:
+            id: north_light_mode
+            value: !lambda 'return x;'
+        - logger.log:
+            format: "North Pool Light Mode Number was set to: %.0f"
+            args: ['x']
+        - component.update: north_pool_light_mode
+
+  - platform: template
+    name: "South Pool Light Mode"
+    id: south_pool_light_mode
+    mode: box
+    min_value: 1
+    max_value: 15
+    step: 1
+    update_interval: never
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(is_booting);'
+            then:
+              - script.execute:
+                  id: cycle_south_light_script
+                  cycles: !lambda 'return x - 1;'
+    lambda: |-
+      return id(south_light_mode);
+    set_action:
+      then:
+        - globals.set:
+            id: south_light_mode
+            value: !lambda 'return x;'
+        - logger.log:
+            format: "South Pool Light Mode Number was set to: %.0f"
+            args: ['x']
+        - component.update: south_pool_light_mode
+          
+  - platform: template
+    name: "Pool Light Dwell Period"
+    id: pool_light_dwell_period
+    mode: box
+    min_value: 100
+    max_value: 2000
+    step: 50
+    unit_of_measurement: "ms"
+    update_interval: never
+    lambda: |-
+      return id(dwell_period_ms);
+    set_action:
+      then:
+        - globals.set:
+            id: dwell_period_ms
+            value: !lambda 'return x;'
+        - component.update: pool_light_dwell_period
+
+button:
+  - platform: restart
+    name: "Restart"
+    id: restart_button
+    entity_category: config
+  - platform: factory_reset
+    name: "Factory Reset"
+    id: reset
+    entity_category: config
+  - platform: safe_mode
+    name: "Safe Mode"
+    internal: false
+    entity_category: config
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: copy
+    source_id: wifi_signal_db
+    name: "WiFi Strength"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+  - platform: template
+    name: "Ready (Int)"
+    id: "READY"
+    unit_of_measurement: " "
+    accuracy_decimals: 0
+  - platform: template
+    name: "Program (Int)"
+    id: "PROG"
+    unit_of_measurement: " "
+    accuracy_decimals: 0
+  - platform: template
+    name: "Mode (Int)"
+    id: "MODE"
+    unit_of_measurement: " "
+    accuracy_decimals: 0
+  - platform: template
+    name: "Power"
+    id: "POWER"
+    unit_of_measurement: "watts"
+    accuracy_decimals: 0
+  - platform: template
+    name: "RPM"
+    id: "RPMA1"
+    unit_of_measurement: "RPM"
+    accuracy_decimals: 0
+  - platform: template
+    name: "Flow"
+    id: "FLOWA1"
+    unit_of_measurement: "GPM"
+    accuracy_decimals: 0
+  - platform: template
+    name: "Percent"
+    id: "PRCNT"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+  - platform: template
+    name: "HoursRemaining"
+    id: "REMTIMEH"
+    unit_of_measurement: "h"
+    accuracy_decimals: 0
+  - platform: template
+    name: "MinutesRemaining"
+    id: "REMTIMEM"
+    unit_of_measurement: "min"
+    accuracy_decimals: 0
+  - platform: template
+    name: "North Preparing Lights Timer"
+    id: north_preparing_lights_timer
+    unit_of_measurement: "s"
+    icon: "mdi:timer-sand"
+  - platform: template
+    name: "South Preparing Lights Timer"
+    id: south_preparing_lights_timer
+    unit_of_measurement: "s"
+    icon: "mdi:timer-sand"
+
+  # --- NEW SENSORS (From CSV) ---
+  - platform: template
+    name: "Pool Pump Error Code"
+    id: pool_pump_error_code
+    icon: mdi:alert-circle
+    accuracy_decimals: 0
+    
+  - platform: template
+    name: "Pool Drive Temperature"
+    id: pool_drive_temp
+    unit_of_measurement: "°C"
+    icon: mdi:chip
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: version
+    name: "Firmware Version"
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+    ssid:
+      name: "Connected SSID"
+      entity_category: diagnostic
+    mac_address:
+      name: "Mac Address"
+      entity_category: diagnostic
+      
+  - platform: template
+    name: "Pump Status Text"
+    lambda: |-
+      int r = id(READY).state;
+      if (r == 4) return {"Off"};
+      if (r == 10) return {"On"};        // 0x0A - Remote Command Run
+      if (r == 40) return {"Schedule"};  // 0x28 - Schedule Mode
+      if (r == 3) return {"Fault"};      // Known fault code
+      return {"Unknown (" + to_string(r) + ")"};
+
+  - platform: template
+    name: "Pump Mode Text"
+    id: pump_mode_text
+    icon: mdi:robot
+    lambda: |-
+      int s = id(MODE).state;
+      if (s == 0) return {"Local/Work Mode"};
+      if (s == 1) return {"Remote Stop"};
+      if (s == 2) return {"Remote Control (Auto)"};
+      if (s == 3) return {"Panasonic Mode"};
+      if (s == 5) return {"Timer Cycle"};
+      if (s == 9) return {"Remote Control"}; 
+      if (s == 10) return {"Standby / Ready"};
+      return {"Mode " + to_string(s)};
+
+  - platform: template
+    name: "Pump Program Text"
+    lambda: |-
+      int p = id(PROG).state;
+      if (p == 17) return {"Priming"};
+      if (p == 255) return {"Pump Off"};
+      if (p >= 1 && p <= 8) return {"Local Program " + to_string(p)};
+      
+      // Mapped from CSV
+      if (p == 9) return {"Rem Eco 30GPM"};
+      if (p == 10) return {"Rem EcoBoost 38GPM"};
+      if (p == 11) return {"Rem Clean 45GPM"};
+      if (p == 12) return {"Rem Max 55GPM"};
+      
+      if (p == 0) return {"Remote Off"};
+      return {"Prg " + to_string(p)};
+
+  - platform: template
+    name: "Pool Pump Error Status"
+    id: pump_error_text
+    icon: mdi:alert-octagon
+    lambda: |-
+      int e = id(pool_pump_error_code).state;
+      // Code 10 is usually a status mirror for "Ready" on these drives
+      if (e == 0) return {"Normal"};
+      if (e == 10) return {"System Ready"}; 
+      if (e == 1) return {"Overcurrent"};
+      if (e == 2) return {"Overvoltage"};
+      if (e == 3) return {"Overheat"};
+      if (e == 4) return {"Sensor Fail"};
+      return {"Error Code: " + to_string(e)};
+    update_interval: 30s # SLOWED DOWN TO REDUCE LOG SPAM
+
+script:
+  - id: refire_pump_logic
+    mode: restart
+    then:
+      - logger.log: "Executing Pump Logic for current mode..."
+      
+      - if:
+          condition:
+            lambda: 'return id(pool_op_mode).state != "Swim_Mode";'
+          then:
+            - script.stop: swim_timer_script
+
+      # Handle OFF Mode
+      - if:
+          condition:
+            lambda: 'return id(pool_op_mode).state == "Off";'
+          then:
+            - switch.turn_on: pump_cmd_off
+            - switch.turn_off: valve_suction
+            - switch.turn_off: valve_aerators
+
+      # Handle ACTIVE Modes (No STOP command sent, allowing seamless transitions)
+      - if:
+          condition:
+            lambda: 'return id(pool_op_mode).state != "Off";'
+          then:
+            
+            # VALVE LOGIC
+            - if:
+                condition:
+                  lambda: 'return id(pool_op_mode).state == "Cleaning_Vac";'
+                then:
+                  - switch.turn_on: valve_suction
+                else:
+                  - switch.turn_off: valve_suction
+            
+            - if:
+                condition:
+                  or:
+                    - lambda: 'return id(pool_op_mode).state == "Super_Cooling";'
+                    - and:
+                        - lambda: 'return id(pool_op_mode).state == "Swim_Mode";'
+                        - lambda: 'return id(swim_mode_aerators).state;'
+                then:
+                  - switch.turn_on: valve_aerators
+                else:
+                  - switch.turn_off: valve_aerators
+
+            # PUMP SPEED LOGIC - Sends command immediately
+            - if:
+                condition:
+                  lambda: 'return id(pool_op_mode).state == "Rem_Eco_30GPM";'
+                then:
+                  # Rem Eco 30GPM
+                  - switch.turn_on: pump_cmd_prg1
+            - if:
+                condition:
+                  or:
+                    - lambda: 'return id(pool_op_mode).state == "Rem_Clean_45GPM";'
+                    - lambda: 'return id(pool_op_mode).state == "Swim_Mode";' # CORRECTED: Swim = 45GPM
+                    - lambda: 'return id(pool_op_mode).state == "Storm_Defense";' # CORRECTED: Storm = 55GPM
+                then:
+                  # Rem Clean 45GPM
+                  - switch.turn_on: pump_cmd_prg3
+            - if:
+                condition:
+                  or:
+                    - lambda: 'return id(pool_op_mode).state == "Rem_EcoBoost_38GPM";'
+                    - lambda: 'return id(pool_op_mode).state == "Cleaning_Vac";'
+                then:
+                  # Rem EcoBoost 38GPM
+                  - switch.turn_on: pump_cmd_prg2
+            - if:
+                condition:
+                  or:
+                    - lambda: 'return id(pool_op_mode).state == "Rem_Max_55GPM";'
+                    - lambda: 'return id(pool_op_mode).state == "Super_Cooling";'
+                    - lambda: 'return id(pool_op_mode).state == "Storm_Defense";' # CORRECTED: Storm = 55GPM
+                then:
+                  # Rem Max 55GPM
+                  - switch.turn_on: pump_cmd_prg4
+            
+            - delay: 1s
+            - switch.turn_on: pool_pump_start_command
+
+            - if:
+                condition:
+                  lambda: 'return id(pool_op_mode).state == "Swim_Mode";'
+                then:
+                  - script.execute: swim_timer_script
+
+  - id: swim_timer_script
+    mode: restart
+    then:
+      - delay: !lambda 'return id(swim_mode_duration).state * 60000;'
+      - select.set:
+          id: pool_op_mode
+          option: "Off"
+
+  - id: cycle_north_light_script
+    parameters:
+      cycles: int
+    mode: restart
+    then:
+      - logger.log: "Starting NORTH light sequence with RESET..."
+      - switch.turn_off: north_light
+      - globals.set:
+          id: countdown_counter
+          value: '30'
+      - repeat:
+          count: 30
+          then:
+            - sensor.template.publish:
+                id: north_preparing_lights_timer
+                state: !lambda 'return id(countdown_counter);'
+            - globals.set:
+                id: countdown_counter
+                value: !lambda 'return id(countdown_counter) - 1;'
+            - delay: 1s
+      - sensor.template.publish:
+          id: north_preparing_lights_timer
+          state: 0
+      - logger.log: "Executing reset sequence (3 toggles)..."
+      - repeat:
+          count: 3
+          then:
+            - switch.turn_on: north_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+            - switch.turn_off: north_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+      - switch.turn_on: north_light
+      - logger.log: "Reset complete. Light is now in Program 1."
+      - delay: 2s
+      - logger.log:
+          format: "Cycling %d times to reach target mode."
+          args: [cycles]
+      - repeat:
+          count: !lambda 'return cycles;'
+          then:
+            - switch.turn_off: north_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+            - switch.turn_on: north_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+      - logger.log: "NORTH light sequence complete."
+      
+  - id: cycle_south_light_script
+    parameters:
+      cycles: int
+    mode: restart
+    then:
+      - logger.log: "Starting SOUTH light sequence with RESET..."
+      - switch.turn_off: south_light
+      - globals.set:
+          id: countdown_counter
+          value: '30'
+      - repeat:
+          count: 30
+          then:
+            - sensor.template.publish:
+                id: south_preparing_lights_timer
+                state: !lambda 'return id(countdown_counter);'
+            - globals.set:
+                id: countdown_counter
+                value: !lambda 'return id(countdown_counter) - 1;'
+            - delay: 1s
+      - sensor.template.publish:
+          id: south_preparing_lights_timer
+          state: 0
+      - logger.log: "Executing reset sequence (3 toggles)..."
+      - repeat:
+          count: 3
+          then:
+            - switch.turn_on: south_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+            - switch.turn_off: south_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+      - switch.turn_on: south_light
+      - logger.log: "Reset complete. Light is now in Program 1."
+      - delay: 2s
+      - logger.log:
+          format: "Cycling %d times to reach target mode."
+          args: [cycles]
+      - repeat:
+          count: !lambda 'return cycles;'
+          then:
+            - switch.turn_off: south_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+            - switch.turn_on: south_light
+            - delay: !lambda 'return id(dwell_period_ms);'
+      - logger.log: "SOUTH light sequence complete."
